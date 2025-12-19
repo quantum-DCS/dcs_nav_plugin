@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dcs_nav_plugin</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="1461190907@qq.com">root</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav2_core</depend>
+  <depend>nav2_util</depend>
+  <depend>nav2_msgs</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>pluginlib</depend>
+  <!-- OpenCV for image-based contour / convex hull and connected components -->
+  <build_depend>opencv</build_depend>
+  <exec_depend>opencv</exec_depend>
+
+  <!-- CasADi C++ for nonlinear optimization with IPOPT -->
+  <!-- casadi may not be a ROS package; ensure system package libcasadi-dev is installed -->
+  <build_depend>casadi</build_depend>
+  <exec_depend>casadi</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
