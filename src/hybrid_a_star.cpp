@@ -26,7 +26,7 @@ HybridAStar::~HybridAStar()
  * @param costmap_ros 代价地图ROS接口
  */
 void HybridAStar::configure(
-  rclcpp_lifecycle::LifecycleNode::SharedPtr parent,
+  const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
   std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
 {
@@ -113,6 +113,9 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal)
 {
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Starting Hybrid A* path planning...");
+  
   nav_msgs::msg::Path global_path;
   global_path.poses.clear();
   global_path.header.stamp = start.header.stamp;
@@ -142,10 +145,33 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   double goal_x = goal.pose.position.x;
   double goal_y = goal.pose.position.y;
   double goal_theta = tf2::getYaw(goal.pose.orientation);
+  
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+    "Start: (%.3f, %.3f, %.3f°) | Goal: (%.3f, %.3f, %.3f°)",
+    start_x, start_y, start_theta * 180.0 / PI,
+    goal_x, goal_y, goal_theta * 180.0 / PI);
+  
+  double straight_line_dist = std::hypot(goal_x - start_x, goal_y - start_y);
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+    "Straight-line distance: %.3f m", straight_line_dist);
 
   // 创建起点节点
   Node3D* start_node = new Node3D(start_x, start_y, start_theta, 0.0, 0.0, nullptr, 0, false);
   Node3D goal_node(goal_x, goal_y, goal_theta, 0.0, 0.0, nullptr, 0, false);
+
+  // 检查起点和终点是否有效
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Validating start and goal positions...");
+  if (isCollision(start_x, start_y, start_theta)) {
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Start position is in collision or outside map!");
+    delete start_node;
+    return global_path;
+  }
+  if (isCollision(goal_x, goal_y, goal_theta)) {
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Goal position is in collision or outside map!");
+    delete start_node;
+    return global_path;
+  }
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Start and goal positions are valid.");
 
   // 计算起点的启发式代价 (h值)
   start_node->h = getHeuristic(*start_node, goal_node);
@@ -153,7 +179,11 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   
   // 计算起点的离散化索引
   int sx, sy, st;
-  getIndex(*start_node, sx, sy, st);
+  if (!getIndex(*start_node, sx, sy, st)) {
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Start position is outside map!");
+    delete start_node;
+    return global_path;
+  }
   start_node->setIndex(sx, sy, st);
 
   // 将起点加入 Open List
@@ -170,6 +200,9 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   Node3D* current_node = nullptr;
   int iterations = 0;
   int max_iterations = 100000; // 最大迭代次数，防止死循环
+  
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+    "Starting search with initial heuristic: %.3f", start_node->h);
 
   // --- 主搜索循环 ---
   while (!open_list.empty() && iterations < max_iterations) {
@@ -187,19 +220,71 @@ nav_msgs::msg::Path HybridAStar::createPlan(
     closed_list[current_key] = current_node;
 
     // 3. 检查是否到达终点
-    // 目前使用简单的欧氏距离判断 (< 0.2m)
+    // 同时判断位置和角度
     double dist_to_goal = std::hypot(current_node->x - goal_x, current_node->y - goal_y);
-    if (dist_to_goal < 0.2) { 
+    double angle_diff = std::abs(current_node->theta - goal_theta);
+    // 归一化角度差到 [0, PI]
+    while (angle_diff > PI) angle_diff = std::abs(angle_diff - 2 * PI);
+    
+    if (dist_to_goal < 0.15 && angle_diff < 0.3) { 
         // 找到路径，回溯生成完整路径
+        RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+          "Goal reached! Final position error: dist=%.3fm, angle=%.1f°",
+          dist_to_goal, angle_diff * 180.0 / PI);
         global_path = reconstructPath(current_node, start, goal);
         break;
     }
+    
+    // 4. Analytic Expansion: 尝试用 Reeds-Shepp 曲线直接连接目标
+    if (dist_to_goal < shot_distance_) {
+        nav_msgs::msg::Path analytic_path = tryAnalyticExpansion(current_node, goal_node);
+        if (!analytic_path.poses.empty()) {
+            // 成功！合并回溯路径和解析路径
+            RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+              "Analytic expansion successful! RS curve found with %zu poses.",
+              analytic_path.poses.size());
+            // 从当前节点的父节点开始回溯（因为 analytic_path 已包含 current_node 的位置）
+            nav_msgs::msg::Path backtrack_path;
+            backtrack_path.header.stamp = start.header.stamp;
+            backtrack_path.header.frame_id = global_frame_;
+            
+            // 回溯到起点
+            Node3D* curr = current_node->parent;
+            std::vector<geometry_msgs::msg::PoseStamped> temp_poses;
+            while (curr != nullptr) {
+                geometry_msgs::msg::PoseStamped pose;
+                pose.header = backtrack_path.header;
+                pose.pose.position.x = curr->x;
+                pose.pose.position.y = curr->y;
+                pose.pose.position.z = 0.0;
+                tf2::Quaternion q;
+                q.setRPY(0, 0, curr->theta);
+                pose.pose.orientation = tf2::toMsg(q);
+                temp_poses.push_back(pose);
+                curr = curr->parent;
+            }
+            // 反转得到从起点到当前节点父节点的路径
+            std::reverse(temp_poses.begin(), temp_poses.end());
+            backtrack_path.poses = temp_poses;
+            
+            // 将解析路径添加到回溯路径后面
+            for (const auto& pose : analytic_path.poses) {
+                backtrack_path.poses.push_back(pose);
+            }
+            global_path = backtrack_path;
+            break;
+        }
+    }
 
-    // 4. 扩展邻居节点 (Motion Primitives)
+    // 5. 扩展邻居节点 (Motion Primitives)
     std::vector<Node3D*> neighbors = getNeighbors(current_node, goal_node);
     for (Node3D* neighbor : neighbors) {
         int nx, ny, nt;
-        getIndex(*neighbor, nx, ny, nt);
+        if (!getIndex(*neighbor, nx, ny, nt)) {
+            // 邻居在地图外，跳过
+            delete neighbor;
+            continue;
+        }
         neighbor->setIndex(nx, ny, nt);
         long neighbor_key = get_index_key(nx, ny, nt);
 
@@ -226,9 +311,38 @@ nav_msgs::msg::Path HybridAStar::createPlan(
     }
   }
 
+  // 输出搜索统计
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+    "Search completed: %d iterations, %zu nodes expanded, %zu nodes in open list",
+    iterations, closed_list.size(), open_list.size());
+  
   if (global_path.poses.empty()) {
-      RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), "Failed to find path after %d iterations", iterations);
+      RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), 
+        "Failed to find path after %d iterations!", iterations);
+      RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), 
+        "Nodes explored: %zu, Final open list size: %zu", 
+        closed_list.size(), open_list.size());
+  } else {
+      double path_length = 0.0;
+      for (size_t i = 1; i < global_path.poses.size(); ++i) {
+          double dx = global_path.poses[i].pose.position.x - 
+                      global_path.poses[i-1].pose.position.x;
+          double dy = global_path.poses[i].pose.position.y - 
+                      global_path.poses[i-1].pose.position.y;
+          path_length += std::hypot(dx, dy);
+      }
+      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+        "Path found successfully!");
+      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+        "  Path length: %.3f m (%.1f%% of straight-line)",
+        path_length, (path_length / straight_line_dist) * 100.0);
+      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+        "  Waypoints: %zu poses", global_path.poses.size());
+      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+        "  Computation: %d iterations, %zu nodes explored",
+        iterations, closed_list.size());
   }
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
 
   // 5. 清理内存
   for (auto& pair : all_nodes) {
@@ -295,11 +409,15 @@ double HybridAStar::getHeuristic(const Node3D& node, const Node3D& goal)
  * @param x_idx 输出 x 索引
  * @param y_idx 输出 y 索引
  * @param theta_idx 输出 theta 索引
+ * @return true 转换成功
+ * @return false 点在地图外
  */
-void HybridAStar::getIndex(const Node3D& node, int& x_idx, int& y_idx, int& theta_idx)
+bool HybridAStar::getIndex(const Node3D& node, int& x_idx, int& y_idx, int& theta_idx)
 {
     unsigned int mx, my;
-    costmap_->worldToMap(node.x, node.y, mx, my);
+    if (!costmap_->worldToMap(node.x, node.y, mx, my)) {
+        return false;  // 点在地图外
+    }
     x_idx = static_cast<int>(mx);
     y_idx = static_cast<int>(my);
     
@@ -310,6 +428,9 @@ void HybridAStar::getIndex(const Node3D& node, int& x_idx, int& y_idx, int& thet
     
     // 将角度离散化
     theta_idx = static_cast<int>(t / (2 * PI / theta_discretization_));
+    if (theta_idx >= theta_discretization_) theta_idx = 0;  // 防止越界
+    
+    return true;
 }
 
 /**
@@ -377,8 +498,8 @@ std::vector<Node3D*> HybridAStar::getNeighbors(Node3D* current, const Node3D& go
  * @brief 从终点回溯到起点，构建路径
  * 
  * @param node 终点节点
- * @param start 起点位姿
- * @param goal 终点位姿
+ * @param start 起点位姿 (用于添加精确起点)
+ * @param goal 终点位姿 (用于添加精确终点)
  * @return nav_msgs::msg::Path 
  */
 nav_msgs::msg::Path HybridAStar::reconstructPath(Node3D* node, const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal)
@@ -387,6 +508,8 @@ nav_msgs::msg::Path HybridAStar::reconstructPath(Node3D* node, const geometry_ms
     path.header.stamp = start.header.stamp;
     path.header.frame_id = global_frame_;
     
+    // 回溯收集所有节点
+    std::vector<geometry_msgs::msg::PoseStamped> temp_poses;
     Node3D* curr = node;
     while (curr != nullptr) {
         geometry_msgs::msg::PoseStamped pose;
@@ -399,12 +522,109 @@ nav_msgs::msg::Path HybridAStar::reconstructPath(Node3D* node, const geometry_ms
         q.setRPY(0, 0, curr->theta);
         pose.pose.orientation = tf2::toMsg(q);
         
-        path.poses.push_back(pose);
+        temp_poses.push_back(pose);
         curr = curr->parent;
     }
     
-    // 因为是从终点回溯的，所以需要反转路径
-    std::reverse(path.poses.begin(), path.poses.end());
+    // 反转得到正向路径
+    std::reverse(temp_poses.begin(), temp_poses.end());
+    
+    // 添加精确的起点（如果第一个点不够接近）
+    if (!temp_poses.empty()) {
+        double dist_to_start = std::hypot(
+            temp_poses.front().pose.position.x - start.pose.position.x,
+            temp_poses.front().pose.position.y - start.pose.position.y);
+        if (dist_to_start > 0.01) {
+            geometry_msgs::msg::PoseStamped start_pose = start;
+            start_pose.header = path.header;
+            path.poses.push_back(start_pose);
+        }
+    }
+    
+    // 添加回溯的路径点
+    for (const auto& pose : temp_poses) {
+        path.poses.push_back(pose);
+    }
+    
+    // 添加精确的终点（如果最后一个点不够接近）
+    if (!path.poses.empty()) {
+        double dist_to_goal = std::hypot(
+            path.poses.back().pose.position.x - goal.pose.position.x,
+            path.poses.back().pose.position.y - goal.pose.position.y);
+        if (dist_to_goal > 0.01) {
+            geometry_msgs::msg::PoseStamped goal_pose = goal;
+            goal_pose.header = path.header;
+            path.poses.push_back(goal_pose);
+        }
+    }
+    
+    return path;
+}
+
+/**
+ * @brief 尝试使用 Reeds-Shepp 曲线直接连接到目标
+ * 
+ * @param current 当前节点
+ * @param goal 目标节点
+ * @return nav_msgs::msg::Path 如果无碰撞则返回路径，否则返回空路径
+ */
+nav_msgs::msg::Path HybridAStar::tryAnalyticExpansion(Node3D* current, const Node3D& goal)
+{
+    nav_msgs::msg::Path path;
+    path.header.frame_id = global_frame_;
+    
+    // 使用 OMPL 计算 Reeds-Shepp 路径
+    ompl::base::ScopedState<ompl::base::SE2StateSpace> from(reeds_shepp_space_);
+    ompl::base::ScopedState<ompl::base::SE2StateSpace> to(reeds_shepp_space_);
+    
+    from->setX(current->x);
+    from->setY(current->y);
+    from->setYaw(current->theta);
+    
+    to->setX(goal.x);
+    to->setY(goal.y);
+    to->setYaw(goal.theta);
+    
+    double rs_length = reeds_shepp_space_->distance(from.get(), to.get());
+    
+    // 沿着 Reeds-Shepp 曲线采样并检查碰撞
+    int num_samples = static_cast<int>(rs_length / interpolation_resolution_) + 1;
+    if (num_samples < 2) num_samples = 2;
+    
+    std::vector<geometry_msgs::msg::PoseStamped> sampled_poses;
+    
+    for (int i = 0; i <= num_samples; ++i) {
+        double t = static_cast<double>(i) / num_samples;
+        
+        ompl::base::State* state = reeds_shepp_space_->allocState();
+        reeds_shepp_space_->interpolate(from.get(), to.get(), t, state);
+        
+        auto* se2state = state->as<ompl::base::SE2StateSpace::StateType>();
+        double x = se2state->getX();
+        double y = se2state->getY();
+        double theta = se2state->getYaw();
+        
+        reeds_shepp_space_->freeState(state);
+        
+        // 碰撞检测
+        if (isCollision(x, y, theta)) {
+            return nav_msgs::msg::Path(); // 返回空路径表示失败
+        }
+        
+        geometry_msgs::msg::PoseStamped pose;
+        pose.header.frame_id = global_frame_;
+        pose.pose.position.x = x;
+        pose.pose.position.y = y;
+        pose.pose.position.z = 0.0;
+        
+        tf2::Quaternion q;
+        q.setRPY(0, 0, theta);
+        pose.pose.orientation = tf2::toMsg(q);
+        
+        sampled_poses.push_back(pose);
+    }
+    
+    path.poses = sampled_poses;
     return path;
 }
 

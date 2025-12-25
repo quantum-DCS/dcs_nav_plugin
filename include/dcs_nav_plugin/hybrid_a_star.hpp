@@ -62,7 +62,7 @@ public:
   ~HybridAStar();
 
   void configure(
-    rclcpp_lifecycle::LifecycleNode::SharedPtr parent,
+    const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
     std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
 
@@ -82,8 +82,9 @@ protected:
   bool isCollision(const Node3D& node);
   double getHeuristic(const Node3D& node, const Node3D& goal);
   std::vector<Node3D*> getNeighbors(Node3D* current, const Node3D& goal);
-  void getIndex(const Node3D& node, int& x_idx, int& y_idx, int& theta_idx);
+  bool getIndex(const Node3D& node, int& x_idx, int& y_idx, int& theta_idx);
   nav_msgs::msg::Path reconstructPath(Node3D* node, const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal);
+  nav_msgs::msg::Path tryAnalyticExpansion(Node3D* current, const Node3D& goal);
 
   rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
   std::shared_ptr<tf2_ros::Buffer> tf_;
