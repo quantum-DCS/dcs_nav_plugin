@@ -41,15 +41,23 @@ endif()
 
 set(DCS_NAV_PLUGIN_SRCS
   src/hybrid_a_star.cpp
+  src/3rd_party/polypartition/polypartition.cpp
 )
+
 if(casadi_FOUND)
-  list(APPEND DCS_NAV_PLUGIN_SRCS src/hyperplane_planner.cpp)
+  list(APPEND DCS_NAV_PLUGIN_SRCS 
+    src/hyperplane_planner.cpp
+    src/sub_sht_mpc_controller.cpp
+    src/geometry/geometry_engine.cpp
+    src/mpc/mpc_solver_casadi.cpp
+  )
 endif()
 
 add_library(dcs_nav_plugin SHARED ${DCS_NAV_PLUGIN_SRCS})
 
 target_include_directories(dcs_nav_plugin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/3rd_party/polypartition>
   $<INSTALL_INTERFACE:include>
   ${OMPL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
@@ -96,6 +104,23 @@ ament_target_dependencies(dcs_nav_plugin
 )
 
 pluginlib_export_plugin_description_file(nav2_core global_planner_plugin.xml)
+
+# Standalone Demo Executable for Geometry Engine Visualization
+add_executable(demo_geometry_standalone 
+  src/demo_geometry_standalone.cpp
+  src/3rd_party/polypartition/polypartition.cpp
+)
+target_include_directories(demo_geometry_standalone PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/3rd_party/polypartition
+  ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(demo_geometry_standalone
+  ${OpenCV_LIBRARIES}
+)
+install(TARGETS demo_geometry_standalone
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 
 install(TARGETS dcs_nav_plugin
   EXPORT dcs_nav_plugin

@@ -84,21 +84,21 @@ void HybridAStar::configure(
 void HybridAStar::cleanup()
 {
   RCLCPP_INFO(
-    rclcpp::get_logger("HybridAStar"), "CleaningUp plugin %s of type HybridAStar",
+    rclcpp::get_logger("HybridAStar"), "正在清理 HybridAStar 插件: %s",
     name_.c_str());
 }
 
 void HybridAStar::activate()
 {
   RCLCPP_INFO(
-    rclcpp::get_logger("HybridAStar"), "Activating plugin %s of type HybridAStar",
+    rclcpp::get_logger("HybridAStar"), "正在激活 HybridAStar 插件: %s",
     name_.c_str());
 }
 
 void HybridAStar::deactivate()
 {
   RCLCPP_INFO(
-    rclcpp::get_logger("HybridAStar"), "Deactivating plugin %s of type HybridAStar",
+    rclcpp::get_logger("HybridAStar"), "正在停用 HybridAStar 插件: %s",
     name_.c_str());
 }
 
@@ -114,7 +114,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   const geometry_msgs::msg::PoseStamped & goal)
 {
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Starting Hybrid A* path planning...");
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "开始 Hybrid A* 路径规划...");
   
   nav_msgs::msg::Path global_path;
   global_path.poses.clear();
@@ -122,7 +122,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   global_path.header.frame_id = global_frame_;
 
   if (!costmap_) {
-    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Costmap is not initialized!");
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "代价地图未初始化!");
     return global_path;
   }
 
@@ -147,31 +147,31 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   double goal_theta = tf2::getYaw(goal.pose.orientation);
   
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "Start: (%.3f, %.3f, %.3f°) | Goal: (%.3f, %.3f, %.3f°)",
+    "起点: (%.3f, %.3f, %.1f°) | 终点: (%.3f, %.3f, %.1f°)",
     start_x, start_y, start_theta * 180.0 / PI,
     goal_x, goal_y, goal_theta * 180.0 / PI);
   
   double straight_line_dist = std::hypot(goal_x - start_x, goal_y - start_y);
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "Straight-line distance: %.3f m", straight_line_dist);
+    "直线距离: %.3f 米", straight_line_dist);
 
   // 创建起点节点
   Node3D* start_node = new Node3D(start_x, start_y, start_theta, 0.0, 0.0, nullptr, 0, false);
   Node3D goal_node(goal_x, goal_y, goal_theta, 0.0, 0.0, nullptr, 0, false);
 
   // 检查起点和终点是否有效
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Validating start and goal positions...");
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "正在验证起点和终点...");
   if (isCollision(start_x, start_y, start_theta)) {
-    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Start position is in collision or outside map!");
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "起点位置碰撞或超出地图!");
     delete start_node;
     return global_path;
   }
   if (isCollision(goal_x, goal_y, goal_theta)) {
-    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Goal position is in collision or outside map!");
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "终点位置碰撞或超出地图!");
     delete start_node;
     return global_path;
   }
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Start and goal positions are valid.");
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "起点和终点验证通过。");
 
   // 计算起点的启发式代价 (h值)
   start_node->h = getHeuristic(*start_node, goal_node);
@@ -180,7 +180,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   // 计算起点的离散化索引
   int sx, sy, st;
   if (!getIndex(*start_node, sx, sy, st)) {
-    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Start position is outside map!");
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "起点位置超出地图范围!");
     delete start_node;
     return global_path;
   }
@@ -202,7 +202,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   int max_iterations = 100000; // 最大迭代次数，防止死循环
   
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "Starting search with initial heuristic: %.3f", start_node->h);
+    "开始搜索，初始启发值: %.3f", start_node->h);
 
   // --- 主搜索循环 ---
   while (!open_list.empty() && iterations < max_iterations) {
@@ -229,7 +229,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
     if (dist_to_goal < 0.15 && angle_diff < 0.3) { 
         // 找到路径，回溯生成完整路径
         RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-          "Goal reached! Final position error: dist=%.3fm, angle=%.1f°",
+          "已到达终点! 最终误差: 距离=%.3fm, 角度=%.1f°",
           dist_to_goal, angle_diff * 180.0 / PI);
         global_path = reconstructPath(current_node, start, goal);
         break;
@@ -241,7 +241,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
         if (!analytic_path.poses.empty()) {
             // 成功！合并回溯路径和解析路径
             RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-              "Analytic expansion successful! RS curve found with %zu poses.",
+              "折线扩展成功! RS曲线生成 %zu 个路由点。",
               analytic_path.poses.size());
             // 从当前节点的父节点开始回溯（因为 analytic_path 已包含 current_node 的位置）
             nav_msgs::msg::Path backtrack_path;
@@ -313,14 +313,14 @@ nav_msgs::msg::Path HybridAStar::createPlan(
 
   // 输出搜索统计
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "Search completed: %d iterations, %zu nodes expanded, %zu nodes in open list",
+    "搜索完成: %d 次迭代, %zu 个节点已扩展, %zu 个节点在开放列表",
     iterations, closed_list.size(), open_list.size());
   
   if (global_path.poses.empty()) {
       RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), 
-        "Failed to find path after %d iterations!", iterations);
+        "路径规划失败! 迭代次数: %d", iterations);
       RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), 
-        "Nodes explored: %zu, Final open list size: %zu", 
+        "已探索节点: %zu, 开放列表大小: %zu", 
         closed_list.size(), open_list.size());
   } else {
       double path_length = 0.0;
@@ -332,14 +332,14 @@ nav_msgs::msg::Path HybridAStar::createPlan(
           path_length += std::hypot(dx, dy);
       }
       RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "Path found successfully!");
+        "✓ 路径规划成功!");
       RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  Path length: %.3f m (%.1f%% of straight-line)",
+        "  路径长度: %.3f 米 (直线的 %.1f%%)",
         path_length, (path_length / straight_line_dist) * 100.0);
       RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  Waypoints: %zu poses", global_path.poses.size());
+        "  路由点: %zu 个", global_path.poses.size());
       RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  Computation: %d iterations, %zu nodes explored",
+        "  计算统计: %d 次迭代, %zu 个节点探索",
         iterations, closed_list.size());
   }
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");

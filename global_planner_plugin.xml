@@ -1,12 +1,14 @@
 <library path="dcs_nav_plugin">
-  <class name="dcs_nav_plugin/HybridAStar" type="dcs_nav_plugin::HybridAStar" base_class_type="nav2_core::GlobalPlanner">
+  <class name="dcs_nav_plugin/DcsShtMpcController" type="dcs_nav_plugin::DcsShtMpcController" base_class_type="nav2_core::Controller">
     <description>
-      This is a Hybrid A* global planner plugin.
+      A SHT-MPC Controller using CasADi for non-linear optimization with convex decomposition obstacles.
     </description>
+  </class>
+  <class name="dcs_nav_plugin/HybridAStar" type="dcs_nav_plugin::HybridAStar" base_class_type="nav2_core::GlobalPlanner">
+    <description>Hybrid A* global planner with Reeds-Shepp curves for non-holonomic robots.</description>
   </class>
   <class name="dcs_nav_plugin/HyperplanePlanner" type="dcs_nav_plugin::HyperplanePlanner" base_class_type="nav2_core::GlobalPlanner">
-    <description>
-      Hyperplane separation based global planner using CasADi+IPOPT and convex decomposition.
-    </description>
+    <description>This is a global planner plugin that uses hyperplane based methods.</description>
   </class>
 </library>
+
