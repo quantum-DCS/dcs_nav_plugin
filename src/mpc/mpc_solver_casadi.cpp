@@ -255,11 +255,16 @@ MpcSolution MpcSolverCasadi::solve(
               << ", ω=" << solution.cmd_vel.angular.z << std::endl;
     
     // Check Slack
+    // Check Slack
     DM eps_opt = sol.value(eps_slack_); // [K, N]
     double max_eps = 0.0;
-    std::vector<double> eps_vec = std::vector<double>(eps_opt);
-    for(double v : eps_vec) {
-        if(v > max_eps) max_eps = v;
+    
+    // 仅检查有效障碍物的松弛变量
+    for(int j=0; j<n_obs; ++j) {
+        for(int k=0; k<N; ++k) {
+            double val = double(eps_opt(j,k));
+            if(val > max_eps) max_eps = val;
+        }
     }
     solution.max_slack = max_eps;
     

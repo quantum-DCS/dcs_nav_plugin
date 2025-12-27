@@ -17,9 +17,7 @@ GeometryEngine::GeometryEngine()
 
 GeometryEngine::~GeometryEngine()
 {
-  if (debug_log_.is_open()) {
-    debug_log_.close();
-  }
+  // std::cerr does not need to be closed
 }
 
 void GeometryEngine::configure(
@@ -33,15 +31,12 @@ void GeometryEngine::configure(
   inflation_radius_ = inflation_radius;
   top_k_ = top_k;
   
-  // 打开调试日志文件
-  debug_log_.open("/tmp/geometry_engine_debug.log", std::ios::out | std::ios::app);
-  if (debug_log_.is_open()) {
-    debug_log_ << "\n========== GeometryEngine 已配置 ==========\n";
-    debug_log_ << "poly_epsilon: " << poly_epsilon << "\n";
-    debug_log_ << "inflation_radius: " << inflation_radius << "\n";
-    debug_log_ << "top_k: " << top_k << "\n";
-    debug_log_ << "==========================================\n" << std::flush;
-  }
+  // Output to stderr for visibility in main logs
+  std::cerr << "\n========== GeometryEngine Configured ==========\n";
+  std::cerr << "poly_epsilon: " << poly_epsilon << "\n";
+  std::cerr << "inflation_radius: " << inflation_radius << "\n";
+  std::cerr << "top_k: " << top_k << "\n";
+  std::cerr << "==============================================\n" << std::flush;
 }
 
 std::vector<Polygon> GeometryEngine::extractObstacles(
@@ -73,7 +68,7 @@ std::vector<Polygon> GeometryEngine::extractObstacles(
       // 简单的面积过滤 (Pixel coords)
       double area = cv::contourArea(contour);
       if (area < 5.0) {
-        debug_log_ << "[GeometryEngine] 跳过小轮廓: 面积=" << area << "\n" << std::flush;
+        std::cerr << "[GeometryEngine] 跳过小轮廓: 面积=" << area << "\n" << std::flush;
         continue;
       }
 
@@ -97,10 +92,16 @@ std::vector<Polygon> GeometryEngine::extractObstacles(
         obs.centroid.y = sum_y / poly.size();
         obs.centroid.z = 0.0;
         
-        // 计算到参考路径的距离
-        obs.dist_to_path = computeDistanceToPath(obs.centroid, ref_path);
+        // 计算到参考路径的距离 (使用顶点的最小距离，而非质心距离，以优先考虑靠近路径的大障碍物)
+        double min_vertex_dist = std::numeric_limits<double>::max();
+        for (const auto& pt : poly) {
+            double d = computeDistanceToPath(pt, ref_path);
+            if (d < min_vertex_dist) min_vertex_dist = d;
+        }
+        // 如果多边形很小，质心距离也可以，但为安全起见取最小值
+        obs.dist_to_path = min_vertex_dist;
         
-        debug_log_ << "[GeometryEngine] 障碍物: 质心=(" << obs.centroid.x << "," << obs.centroid.y 
+        std::cerr << "[GeometryEngine] 障碍物: 质心=(" << obs.centroid.x << "," << obs.centroid.y 
                   << "), 到路径=" << obs.dist_to_path << "m, 顶点=" << poly.size() << "\n" << std::flush;
         
         candidate_obstacles.push_back(obs);
@@ -108,7 +109,7 @@ std::vector<Polygon> GeometryEngine::extractObstacles(
       }
     }
 
-    debug_log_ << "[GeometryEngine] 总障碍物: " << candidate_obstacles.size() << ", Top-K=" << top_k_ << "\n" << std::flush;
+    std::cerr << "[GeometryEngine] 总障碍物: " << candidate_obstacles.size() << ", Top-K=" << top_k_ << "\n" << std::flush;
 
 
     // 3. Top-K 排序筛选
@@ -121,7 +122,7 @@ std::vector<Polygon> GeometryEngine::extractObstacles(
           return a.dist_to_path < b.dist_to_path;
         });
       
-      debug_log_ << "[GeometryEngine] Top-" << top_k_ << " 障碍物（按到路径距离排序）：" << "\n" << std::flush;
+      std::cerr << "[GeometryEngine] Top-" << top_k_ << " 障碍物（按到路径距离排序）：" << "\n" << std::flush;
       for (int i = 0; i < top_k_; ++i) {
         std::cerr << "  " << i << ": 质心=(" << candidate_obstacles[i].centroid.x << "," 
                   << candidate_obstacles[i].centroid.y << "), 距离=" << candidate_obstacles[i].dist_to_path << "\n" << std::flush;
@@ -140,10 +141,10 @@ std::vector<Polygon> GeometryEngine::extractObstacles(
     return result;
     
   } catch (const std::exception& e) {
-    debug_log_ << "[GeometryEngine] extractObstacles 异常: " << e.what() << "\n" << std::flush;
+    std::cerr << "[GeometryEngine] extractObstacles 异常: " << e.what() << "\n" << std::flush;
     return {};
   } catch (...) {
-    debug_log_ << "[GeometryEngine] extractObstacles 未知异常" << "\n" << std::flush;
+    std::cerr << "[GeometryEngine] extractObstacles 未知异常" << "\n" << std::flush;
     return {};
   }
 }
@@ -170,19 +171,23 @@ std::vector<std::vector<cv::Point>> GeometryEngine::getContoursFromCostmap(nav2_
     
     // 统计像素值分布 (调试用)
     int count_lethal = 0, count_inscribed = 0, count_free = 0;
+    unsigned char max_val = 0;
     for (unsigned int i = 0; i < size_x * size_y; ++i) {
+      if (char_map[i] > max_val) max_val = char_map[i];
       if (char_map[i] >= 254) count_lethal++;
       else if (char_map[i] >= 128) count_inscribed++;
       else if (char_map[i] <= 1) count_free++;
     }
-    debug_log_ << "[GeometryEngine] Costmap: " << size_x << "x" << size_y 
+    std::cerr << "[GeometryEngine] Costmap: " << size_x << "x" << size_y 
+              << " | MAX=" << (int)max_val
               << " | LETHAL(>=254)=" << count_lethal 
               << " | HIGH(>=128)=" << count_inscribed 
               << " | FREE(<=1)=" << count_free << "\n" << std::flush;
     
-    // 二值化: Costmap LETHAL_OBSTACLE = 254, NO_INFORMATION = 255
+    // 二值化: Lower threshold to capture inflated obstacles and bridge gaps
+    // Costmap LETHAL=254, INSCRIBED=253. Lowering to 100 includes high-cost areas.
     cv::Mat bin_img;
-    cv::threshold(map_img, bin_img, 252, 255, cv::THRESH_BINARY);
+    cv::threshold(map_img, bin_img, 100, 255, cv::THRESH_BINARY);
 
     // 膨胀处理 (可选)
     if (inflation_radius_ > 0) {
@@ -197,16 +202,16 @@ std::vector<std::vector<cv::Point>> GeometryEngine::getContoursFromCostmap(nav2_
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(bin_img, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
     
-    debug_log_ << "[GeometryEngine] 二值化后白色像素: " << cv::countNonZero(bin_img)
+    std::cerr << "[GeometryEngine] 二值化后白色像素: " << cv::countNonZero(bin_img)
               << " | 找到轮廓: " << contours.size() << "\n" << std::flush;
 
     return contours;
     
   } catch (const std::exception& e) {
-    debug_log_ << "[GeometryEngine] getContoursFromCostmap 异常: " << e.what() << "\n" << std::flush;
+    std::cerr << "[GeometryEngine] getContoursFromCostmap 异常: " << e.what() << "\n" << std::flush;
     return {};
   } catch (...) {
-    debug_log_ << "[GeometryEngine] getContoursFromCostmap 未知异常" << "\n" << std::flush;
+    std::cerr << "[GeometryEngine] getContoursFromCostmap 未知异常" << "\n" << std::flush;
     return {};
   }
 }
@@ -240,7 +245,7 @@ std::vector<Polygon> GeometryEngine::decomposeConvex(
   
   // 检查坐标是否在合理范围内 (60x60 的 local costmap)
   if (min_x < -1000 || max_x > 10000 || min_y < -1000 || max_y > 10000) {
-    debug_log_ << "[GeometryEngine] 异常轮廓坐标: x=[" << min_x << "," << max_x 
+    std::cerr << "[GeometryEngine] 异常轮廓坐标: x=[" << min_x << "," << max_x 
               << "], y=[" << min_y << "," << max_y << "], 点数=" << contour_size << "\n" << std::flush;
     return {};
   }
@@ -261,7 +266,7 @@ std::vector<Polygon> GeometryEngine::decomposeConvex(
     // 限制简化后的点数
     if (approx_contour.size() > 100) {
       // 太多点，跳过
-      debug_log_ << "[GeometryEngine] 简化后仍有 " << approx_contour.size() << " 点，跳过" << "\n" << std::flush;
+      std::cerr << "[GeometryEngine] 简化后仍有 " << approx_contour.size() << " 点，跳过" << "\n" << std::flush;
       return {};
     }
 
@@ -270,7 +275,7 @@ std::vector<Polygon> GeometryEngine::decomposeConvex(
     cv::convexHull(approx_contour, hull, false, true);
     
     if (hull.size() < 3 || hull.size() > 50) {
-      debug_log_ << "[GeometryEngine] 凸包无效: " << hull.size() << " 点" << "\n" << std::flush;
+      std::cerr << "[GeometryEngine] 凸包无效: " << hull.size() << " 点" << "\n" << std::flush;
       return {};
     }
 
@@ -288,17 +293,17 @@ std::vector<Polygon> GeometryEngine::decomposeConvex(
     return {poly};
     
   } catch (const cv::Exception& e) {
-    debug_log_ << "[GeometryEngine] OpenCV 异常: " << e.what() 
+    std::cerr << "[GeometryEngine] OpenCV 异常: " << e.what() 
               << " | 轮廓点数=" << contour_size 
               << " | 坐标范围: x=[" << min_x << "," << max_x << "], y=[" << min_y << "," << max_y << "]" 
               << "\n" << std::flush;
     return {};
   } catch (const std::exception& e) {
-    debug_log_ << "[GeometryEngine] decomposeConvex 异常: " << e.what() 
+    std::cerr << "[GeometryEngine] decomposeConvex 异常: " << e.what() 
               << " | 轮廓点数=" << contour_size << "\n" << std::flush;
     return {};
   } catch (...) {
-    debug_log_ << "[GeometryEngine] decomposeConvex 未知异常 | 轮廓点数=" << contour_size << "\n" << std::flush;
+    std::cerr << "[GeometryEngine] decomposeConvex 未知异常 | 轮廓点数=" << contour_size << "\n" << std::flush;
     return {};
   }
 }

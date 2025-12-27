@@ -69,6 +69,14 @@ void DcsShtMpcController::deactivate()
 void DcsShtMpcController::setPlan(const nav_msgs::msg::Path & path)
 {
   global_plan_ = path;
+  if (!path.poses.empty()) {
+    RCLCPP_INFO(logger_, "[SHT-MPC] 收到新全局路径: %zu 点, 终点: (%.2f, %.2f)", 
+      path.poses.size(), 
+      path.poses.back().pose.position.x, 
+      path.poses.back().pose.position.y);
+  } else {
+    RCLCPP_WARN(logger_, "[SHT-MPC] 收到空路径!");
+  }
 }
 
 void DcsShtMpcController::setSpeedLimit(const double & speed_limit, const bool & percentage)
@@ -120,6 +128,18 @@ geometry_msgs::msg::TwistStamped DcsShtMpcController::computeVelocityCommands(
   {
       RCLCPP_WARN(logger_, "Could not transform the global plan to the frame of the controller");
       return geometry_msgs::msg::TwistStamped();
+  }
+  
+  if (!transformed_plan.poses.empty()) {
+      double dist_to_goal = std::hypot(
+        transformed_plan.poses.back().pose.position.x - pose.pose.position.x,
+        transformed_plan.poses.back().pose.position.y - pose.pose.position.y
+      );
+      RCLCPP_INFO_THROTTLE(logger_, *clock_, 2000,
+        "[SHT-MPC] 距离目标: %.2fm (变换后终点: %.2f, %.2f) (当前: %.2f, %.2f)", 
+        dist_to_goal,
+        transformed_plan.poses.back().pose.position.x, transformed_plan.poses.back().pose.position.y,
+        pose.pose.position.x, pose.pose.position.y);
   }
 
   // 2. Generate Reference Trajectory (using transformed plan)
@@ -202,13 +222,16 @@ std::vector<geometry_msgs::msg::PoseStamped> DcsShtMpcController::generateRefere
         return ref_traj;
     }
 
-    // 1. Find Closest Point Index
-    // (Optimization: plan is transformed to costmap frame now, so comparison is valid)
+    // 获取当前位置
+    double current_x = current_pose.pose.position.x;
+    double current_y = current_pose.pose.position.y;
+    
+    // 1. 找到路径上距离当前位置最近的点索引
     size_t closest_idx = 0;
     double min_dist_sq = std::numeric_limits<double>::max();
-    for(size_t i=0; i<plan.poses.size(); ++i) {
-        double dx = plan.poses[i].pose.position.x - current_pose.pose.position.x;
-        double dy = plan.poses[i].pose.position.y - current_pose.pose.position.y;
+    for (size_t i = 0; i < plan.poses.size(); ++i) {
+        double dx = plan.poses[i].pose.position.x - current_x;
+        double dy = plan.poses[i].pose.position.y - current_y;
         double d2 = dx*dx + dy*dy;
         if (d2 < min_dist_sq) {
             min_dist_sq = d2;
@@ -216,134 +239,83 @@ std::vector<geometry_msgs::msg::PoseStamped> DcsShtMpcController::generateRefere
         }
     }
     
-    // 2. Generate Time-Based Reference Points
-    // Assume constant target velocity for reference generation
-    double v_ref = config_.v_max; 
-    if (v_ref < 0.1) v_ref = 0.5; // Minimal speed
-
-    for(int k=0; k<=N; ++k) {
-        double target_dist = k * v_ref * dt;
+    // 2. 计算从 closest_idx 开始的累计弧长
+    std::vector<double> arc_lengths;
+    arc_lengths.push_back(0.0);
+    double total_arc = 0.0;
+    
+    for (size_t i = closest_idx + 1; i < plan.poses.size(); ++i) {
+        double dx = plan.poses[i].pose.position.x - plan.poses[i-1].pose.position.x;
+        double dy = plan.poses[i].pose.position.y - plan.poses[i-1].pose.position.y;
+        total_arc += std::hypot(dx, dy);
+        arc_lengths.push_back(total_arc);
+    }
+    
+    // 3. 计算 MPC 预测时域内的预视距离
+    double v_ref = config_.v_max;
+    if (v_ref < 0.1) v_ref = 0.3;
+    double lookahead_dist = N * v_ref * dt;  // MPC时域内能走的距离
+    double sample_dist = std::min(lookahead_dist, total_arc);
+    
+    // 4. 沿路径均匀采样 N+1 个点
+    for (int k = 0; k <= N; ++k) {
+        double target_arc = (static_cast<double>(k) / static_cast<double>(N)) * sample_dist;
         
-        // Walk forward from closest_idx to find the segment containing target_dist
-        double accumulated_dist = 0.0;
-        size_t search_idx = closest_idx;
-        
-        // Find segment [p1, p2]
-        while(search_idx + 1 < plan.poses.size()) {
-            double ds = std::hypot(
-                plan.poses[search_idx+1].pose.position.x - plan.poses[search_idx].pose.position.x,
-                plan.poses[search_idx+1].pose.position.y - plan.poses[search_idx].pose.position.y
-            );
-            if (accumulated_dist + ds >= target_dist) {
-                // Interpolate in this segment
-                double ratio = (target_dist - accumulated_dist) / std::max(ds, 1e-6);
-                
-                geometry_msgs::msg::PoseStamped p;
-                p.header = plan.poses[search_idx].header;
-                
-                // Linear Interp Position (Approximates Spline on dense path)
-                p.pose.position.x = plan.poses[search_idx].pose.position.x + ratio * (plan.poses[search_idx+1].pose.position.x - plan.poses[search_idx].pose.position.x);
-                p.pose.position.y = plan.poses[search_idx].pose.position.y + ratio * (plan.poses[search_idx+1].pose.position.y - plan.poses[search_idx].pose.position.y);
-                
-                // Slerp Orientation - 使用路径切线方向而非全局规划朝向
-                // 计算当前段的切线方向作为参考朝向（更准确）
-                double dx_seg = plan.poses[search_idx+1].pose.position.x - plan.poses[search_idx].pose.position.x;
-                double dy_seg = plan.poses[search_idx+1].pose.position.y - plan.poses[search_idx].pose.position.y;
-                double yaw = std::atan2(dy_seg, dx_seg);  // 路径切线方向
-                
-                tf2::Quaternion q;
-                q.setRPY(0, 0, yaw);
-                p.pose.orientation = tf2::toMsg(q);
-                
-                ref_traj.push_back(p);
+        // 在 arc_lengths 中二分查找
+        size_t seg_idx = 0;
+        for (size_t i = 1; i < arc_lengths.size(); ++i) {
+            if (arc_lengths[i] >= target_arc) {
+                seg_idx = i - 1;
                 break;
             }
-            accumulated_dist += ds;
-            search_idx++;
+            seg_idx = i;  // target_arc 超过了总长度，使用最后一段
         }
         
-        // If end of path reached - 使用最后一段的切线方向而非终点朝向
-        if (ref_traj.size() <= (size_t)k) {
-            geometry_msgs::msg::PoseStamped p = plan.poses.back();
-            
-            // 计算最后一段的切线方向以保持朝向连续性
-            if (plan.poses.size() >= 2) {
-                size_t n = plan.poses.size();
-                double dx_last = plan.poses[n-1].pose.position.x - plan.poses[n-2].pose.position.x;
-                double dy_last = plan.poses[n-1].pose.position.y - plan.poses[n-2].pose.position.y;
-                double yaw_last = std::atan2(dy_last, dx_last);
-                
-                tf2::Quaternion q;
-                q.setRPY(0, 0, yaw_last);
-                p.pose.orientation = tf2::toMsg(q);
+        // 在这一段内插值
+        size_t path_idx = closest_idx + seg_idx;
+        size_t next_idx = std::min(path_idx + 1, plan.poses.size() - 1);
+        
+        double seg_start_arc = arc_lengths[seg_idx];
+        double seg_end_arc = (seg_idx + 1 < arc_lengths.size()) ? arc_lengths[seg_idx + 1] : arc_lengths.back();
+        double seg_len = seg_end_arc - seg_start_arc;
+        
+        double t = 0.0;
+        if (seg_len > 0.001) {
+            t = (target_arc - seg_start_arc) / seg_len;
+            t = std::clamp(t, 0.0, 1.0);
+        }
+        
+        geometry_msgs::msg::PoseStamped p;
+        p.header = current_pose.header;
+        
+        // 线性插值位置
+        p.pose.position.x = (1.0 - t) * plan.poses[path_idx].pose.position.x + 
+                            t * plan.poses[next_idx].pose.position.x;
+        p.pose.position.y = (1.0 - t) * plan.poses[path_idx].pose.position.y + 
+                            t * plan.poses[next_idx].pose.position.y;
+        p.pose.position.z = 0.0;
+        
+        // 计算朝向：使用路径切线方向
+        double yaw = 0.0;
+        if (next_idx > path_idx) {
+            double dx = plan.poses[next_idx].pose.position.x - plan.poses[path_idx].pose.position.x;
+            double dy = plan.poses[next_idx].pose.position.y - plan.poses[path_idx].pose.position.y;
+            if (std::hypot(dx, dy) > 0.001) {
+                yaw = std::atan2(dy, dx);
+            } else {
+                // 使用路径点的朝向
+                yaw = tf2::getYaw(plan.poses[path_idx].pose.orientation);
             }
-            
-            ref_traj.push_back(p);
+        } else {
+            // 最后一个点，使用目标朝向
+            yaw = tf2::getYaw(plan.poses.back().pose.orientation);
         }
-    }
-    
-    // 检测是否所有参考点都在终点（接近目标时的特殊情况）
-    if (ref_traj.size() >= 2) {
-        const auto& first = ref_traj.front();
-        const auto& last = ref_traj.back();
-        double dist = std::hypot(
-            last.pose.position.x - first.pose.position.x,
-            last.pose.position.y - first.pose.position.y);
         
-        // 如果所有参考点位置几乎相同（都在终点），创建朝向平滑过渡
-        if (dist < 0.1) {  // 阈值 0.1m
-            double current_yaw = tf2::getYaw(current_pose.pose.orientation);
-            double goal_yaw = tf2::getYaw(last.pose.orientation);
-            
-            // 归一化目标朝向到当前朝向附近
-            while (goal_yaw - current_yaw > M_PI) goal_yaw -= 2.0 * M_PI;
-            while (goal_yaw - current_yaw < -M_PI) goal_yaw += 2.0 * M_PI;
-            
-            // 在预测时域内平滑过渡朝向
-            size_t N = ref_traj.size();
-            for (size_t i = 0; i < N; ++i) {
-                double t = static_cast<double>(i) / static_cast<double>(N - 1);  // 0 到 1
-                double interp_yaw = current_yaw + t * (goal_yaw - current_yaw);
-                
-                tf2::Quaternion q;
-                q.setRPY(0, 0, interp_yaw);
-                ref_traj[i].pose.orientation = tf2::toMsg(q);
-            }
-            
-            return ref_traj;
-        }
-    }
-    
-    // 强制朝向平滑 - 限制相邻点之间的朝向变化率
-    // 这是解决高松弛值和抽动的关键修复
-    if (!ref_traj.empty()) {
-        double prev_yaw = tf2::getYaw(current_pose.pose.orientation);  // 从当前朝向开始
+        tf2::Quaternion q;
+        q.setRPY(0, 0, yaw);
+        p.pose.orientation = tf2::toMsg(q);
         
-        // 每个参考点允许的最大朝向变化（根据预测时间步长和最大角速度）
-        // dt = 0.1s (10Hz), omega_max = 0.5 rad/s -> max_delta = 0.05 rad per step
-        // 但为了更平滑，我们使用稍大的值
-        const double max_yaw_rate_per_step = 0.1;  // rad per reference point
-        
-        for (auto & p : ref_traj) {
-            double target_yaw = tf2::getYaw(p.pose.orientation);
-            
-            // 归一化目标朝向到与 prev_yaw 最接近的等价角度
-            while (target_yaw - prev_yaw > M_PI) target_yaw -= 2.0 * M_PI;
-            while (target_yaw - prev_yaw < -M_PI) target_yaw += 2.0 * M_PI;
-            
-            // 限制朝向变化率
-            double delta = target_yaw - prev_yaw;
-            if (delta > max_yaw_rate_per_step) delta = max_yaw_rate_per_step;
-            if (delta < -max_yaw_rate_per_step) delta = -max_yaw_rate_per_step;
-            
-            double smoothed_yaw = prev_yaw + delta;
-            
-            tf2::Quaternion q;
-            q.setRPY(0, 0, smoothed_yaw);
-            p.pose.orientation = tf2::toMsg(q);
-            
-            prev_yaw = smoothed_yaw;  // 更新参考（使用平滑后的值）
-        }
+        ref_traj.push_back(p);
     }
     
     return ref_traj;
@@ -403,6 +375,13 @@ void DcsShtMpcController::publishVisualizations(
         sel_mk.markers.push_back(m);
     }
     sel_obs_pub_->publish(sel_mk);
+    
+    // 3. Publish Local Plan (Reference Trajectory)
+    nav_msgs::msg::Path local_plan_msg;
+    local_plan_msg.header.stamp = now;
+    local_plan_msg.header.frame_id = frame;
+    local_plan_msg.poses = ref_traj;
+    local_plan_pub_->publish(local_plan_msg);
 }
 
 bool DcsShtMpcController::transformPlan(
