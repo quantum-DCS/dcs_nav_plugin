@@ -26,7 +26,7 @@ HybridAStar::~HybridAStar()
  * @param costmap_ros 代价地图ROS接口
  */
 void HybridAStar::configure(
-  rclcpp_lifecycle::LifecycleNode::SharedPtr parent,
+  const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
   std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
 {
@@ -44,10 +44,43 @@ void HybridAStar::configure(
 
   // --- 参数声明与获取 ---
 
+  // ========== 读取运动模型类型 ==========
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".motion_model", rclcpp::ParameterValue("ACKERMANN"));
+  node->get_parameter(name + ".motion_model", motion_model_);
+  
+  // 验证参数合法性
+  if (motion_model_ != "ACKERMANN" && motion_model_ != "OMNIDIRECTIONAL") {
+    RCLCPP_ERROR(node->get_logger(), 
+      "[HybridAStar] Invalid motion_model: %s. Using ACKERMANN.", 
+      motion_model_.c_str());
+    motion_model_ = "ACKERMANN";
+  }
+  
+  RCLCPP_INFO(node->get_logger(), 
+    "[HybridAStar] 正在激活 HybridAStar 插件: %s", name.c_str());
+  RCLCPP_INFO(node->get_logger(), 
+    "[HybridAStar] 运动模型: %s", motion_model_.c_str());
+
+  // ========== 通用参数 ==========
+  
   // 插值分辨率：路径点的间隔距离 (米)
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".interpolation_resolution", rclcpp::ParameterValue(0.1));
   node->get_parameter(name + ".interpolation_resolution", interpolation_resolution_);
+  
+  // 射击距离：当距离目标小于此值时，尝试直接用 Reeds-Shepp 曲线连接（暂未使用，保留参数）
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".shot_distance", rclcpp::ParameterValue(5.0));
+  node->get_parameter(name + ".shot_distance", shot_distance_);
+
+  // 角度离散化：将 360 度分为多少份，用于构建 3D 网格 (x, y, theta)
+  // 72 表示每 5 度一份
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".theta_discretization", rclcpp::ParameterValue(72)); 
+  node->get_parameter(name + ".theta_discretization", theta_discretization_);
+
+  // ========== Ackermann 模式专用参数 ==========
   
   // 最小转弯半径：车辆运动学的核心约束 (米)
   // 根据 X3 机器人 URDF 估算，约为 0.4m
@@ -69,36 +102,62 @@ void HybridAStar::configure(
     node, name + ".direction_change_penalty", rclcpp::ParameterValue(2.0));
   node->get_parameter(name + ".direction_change_penalty", direction_change_penalty_);
   
-  // 射击距离：当距离目标小于此值时，尝试直接用 Reeds-Shepp 曲线连接（暂未使用，保留参数）
-  nav2_util::declare_parameter_if_not_declared(
-    node, name + ".shot_distance", rclcpp::ParameterValue(5.0));
-  node->get_parameter(name + ".shot_distance", shot_distance_);
+  // ========== Omnidirectional 模式专用参数 ==========
+  
+  if (motion_model_ == "OMNIDIRECTIONAL") {
+    // 横向移动步长（米）
+    nav2_util::declare_parameter_if_not_declared(
+      node, name + ".lateral_step_size", rclcpp::ParameterValue(0.2));
+    node->get_parameter(name + ".lateral_step_size", lateral_step_size_);
+    
+    // 原地旋转步长（弧度）
+    nav2_util::declare_parameter_if_not_declared(
+      node, name + ".rotation_step", rclcpp::ParameterValue(0.26));  // ~15°
+    node->get_parameter(name + ".rotation_step", rotation_step_);
+    
+    // 旋转代价惩罚因子
+    nav2_util::declare_parameter_if_not_declared(
+      node, name + ".rotation_penalty", rclcpp::ParameterValue(0.5));
+    node->get_parameter(name + ".rotation_penalty", rotation_penalty_);
+    
+    // 对角线移动代价惩罚因子
+    nav2_util::declare_parameter_if_not_declared(
+      node, name + ".diagonal_penalty", rclcpp::ParameterValue(1.2));
+    node->get_parameter(name + ".diagonal_penalty", diagonal_penalty_);
+    
+    RCLCPP_INFO(node->get_logger(), 
+      "  横向步长=%.2fm, 旋转步长=%.1f°", 
+      lateral_step_size_, rotation_step_ * 180.0 / M_PI);
+  }
 
-  // 角度离散化：将 360 度分为多少份，用于构建 3D 网格 (x, y, theta)
-  // 72 表示每 5 度一份
+  // Debug Utils
+  std::string debug_log_dir;
   nav2_util::declare_parameter_if_not_declared(
-    node, name + ".theta_discretization", rclcpp::ParameterValue(72)); 
-  node->get_parameter(name + ".theta_discretization", theta_discretization_);
+    node, name + ".debug.log_dir", rclcpp::ParameterValue("~/ros2_ws/src/dcs_nav_plugin/planner_log"));
+  node->get_parameter(name + ".debug.log_dir", debug_log_dir);
+
+  debug_utils_ = std::make_shared<DebugUtils>();
+  debug_utils_->initialize(debug_log_dir, "planner");
 }
 
 void HybridAStar::cleanup()
 {
   RCLCPP_INFO(
-    rclcpp::get_logger("HybridAStar"), "CleaningUp plugin %s of type HybridAStar",
+    rclcpp::get_logger("HybridAStar"), "正在清理 HybridAStar 插件: %s",
     name_.c_str());
 }
 
 void HybridAStar::activate()
 {
   RCLCPP_INFO(
-    rclcpp::get_logger("HybridAStar"), "Activating plugin %s of type HybridAStar",
+    rclcpp::get_logger("HybridAStar"), "正在激活 HybridAStar 插件: %s",
     name_.c_str());
 }
 
 void HybridAStar::deactivate()
 {
   RCLCPP_INFO(
-    rclcpp::get_logger("HybridAStar"), "Deactivating plugin %s of type HybridAStar",
+    rclcpp::get_logger("HybridAStar"), "正在停用 HybridAStar 插件: %s",
     name_.c_str());
 }
 
@@ -114,7 +173,11 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   const geometry_msgs::msg::PoseStamped & goal)
 {
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Starting Hybrid A* path planning...");
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "开始 Hybrid A* 路径规划...");
+  
+  if (debug_utils_) {
+      debug_utils_->log("HybridAStar::createPlan called.");
+  }
   
   nav_msgs::msg::Path global_path;
   global_path.poses.clear();
@@ -122,7 +185,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   global_path.header.frame_id = global_frame_;
 
   if (!costmap_) {
-    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Costmap is not initialized!");
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "代价地图未初始化!");
     return global_path;
   }
 
@@ -146,32 +209,31 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   double goal_y = goal.pose.position.y;
   double goal_theta = tf2::getYaw(goal.pose.orientation);
   
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "Start: (%.3f, %.3f, %.3f°) | Goal: (%.3f, %.3f, %.3f°)",
-    start_x, start_y, start_theta * 180.0 / PI,
-    goal_x, goal_y, goal_theta * 180.0 / PI);
+  std::stringstream ss_start;
+  ss_start << "[HybridAStar] 起点: (" << start_x << ", " << start_y << ", " << start_theta * 180.0 / PI << "°) | "
+           << "终点: (" << goal_x << ", " << goal_y << ", " << goal_theta * 180.0 / PI << "°)";
+  debug_utils_->log(ss_start.str());
   
   double straight_line_dist = std::hypot(goal_x - start_x, goal_y - start_y);
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "Straight-line distance: %.3f m", straight_line_dist);
+  // debug_utils_->log("直线距离: " + std::to_string(straight_line_dist) + " 米");
 
   // 创建起点节点
   Node3D* start_node = new Node3D(start_x, start_y, start_theta, 0.0, 0.0, nullptr, 0, false);
   Node3D goal_node(goal_x, goal_y, goal_theta, 0.0, 0.0, nullptr, 0, false);
 
   // 检查起点和终点是否有效
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Validating start and goal positions...");
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "正在验证起点和终点...");
   if (isCollision(start_x, start_y, start_theta)) {
-    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Start position is in collision or outside map!");
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "起点位置碰撞或超出地图!");
     delete start_node;
     return global_path;
   }
   if (isCollision(goal_x, goal_y, goal_theta)) {
-    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Goal position is in collision or outside map!");
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "终点位置碰撞或超出地图!");
     delete start_node;
     return global_path;
   }
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "Start and goal positions are valid.");
+  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "起点和终点验证通过。");
 
   // 计算起点的启发式代价 (h值)
   start_node->h = getHeuristic(*start_node, goal_node);
@@ -180,7 +242,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   // 计算起点的离散化索引
   int sx, sy, st;
   if (!getIndex(*start_node, sx, sy, st)) {
-    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "Start position is outside map!");
+    RCLCPP_ERROR(rclcpp::get_logger("HybridAStar"), "起点位置超出地图范围!");
     delete start_node;
     return global_path;
   }
@@ -202,7 +264,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   int max_iterations = 100000; // 最大迭代次数，防止死循环
   
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "Starting search with initial heuristic: %.3f", start_node->h);
+    "开始搜索,初始启发值: %.3f", start_node->h);
 
   // --- 主搜索循环 ---
   while (!open_list.empty() && iterations < max_iterations) {
@@ -226,23 +288,38 @@ nav_msgs::msg::Path HybridAStar::createPlan(
     // 归一化角度差到 [0, PI]
     while (angle_diff > PI) angle_diff = std::abs(angle_diff - 2 * PI);
     
-    if (dist_to_goal < 0.15 && angle_diff < 0.3) { 
-        // 找到路径，回溯生成完整路径
+    if (dist_to_goal < 0.01 && angle_diff < 0.05) { 
+        // 找到路径,回溯生成完整路径
         RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-          "Goal reached! Final position error: dist=%.3fm, angle=%.1f°",
+          "已到达终点! 最终误差: 距离=%.3fm, 角度=%.1f°",
           dist_to_goal, angle_diff * 180.0 / PI);
         global_path = reconstructPath(current_node, start, goal);
         break;
     }
     
-    // 4. Analytic Expansion: 尝试用 Reeds-Shepp 曲线直接连接目标
+    // 4. Analytic Expansion: 尝试直接连接目标
     if (dist_to_goal < shot_distance_) {
-        nav_msgs::msg::Path analytic_path = tryAnalyticExpansion(current_node, goal_node);
+        nav_msgs::msg::Path analytic_path;
+        
+        if (motion_model_ == "OMNIDIRECTIONAL") {
+            // 全向模式:使用直线扩展(不改变朝向,直接移动)
+            analytic_path = tryLinearExpansion(current_node, goal_node);
+            if (!analytic_path.poses.empty()) {
+                RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+                  "全向直线扩展成功! 生成 %zu 个路由点。",
+                  analytic_path.poses.size());
+            }
+        } else {
+            // Ackermann模式:使用Reeds-Shepp曲线
+            analytic_path = tryAnalyticExpansion(current_node, goal_node);
+            if (!analytic_path.poses.empty()) {
+                RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
+                  "RS曲线扩展成功! 生成 %zu 个路由点。",
+                  analytic_path.poses.size());
+            }
+        }
+        
         if (!analytic_path.poses.empty()) {
-            // 成功！合并回溯路径和解析路径
-            RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-              "Analytic expansion successful! RS curve found with %zu poses.",
-              analytic_path.poses.size());
             // 从当前节点的父节点开始回溯（因为 analytic_path 已包含 current_node 的位置）
             nav_msgs::msg::Path backtrack_path;
             backtrack_path.header.stamp = start.header.stamp;
@@ -313,15 +390,14 @@ nav_msgs::msg::Path HybridAStar::createPlan(
 
   // 输出搜索统计
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "Search completed: %d iterations, %zu nodes expanded, %zu nodes in open list",
+    "搜索完成: %d 次迭代, %zu 个节点已扩展, %zu 个节点在开放列表",
     iterations, closed_list.size(), open_list.size());
   
   if (global_path.poses.empty()) {
-      RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), 
-        "Failed to find path after %d iterations!", iterations);
-      RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), 
-        "Nodes explored: %zu, Final open list size: %zu", 
-        closed_list.size(), open_list.size());
+      std::stringstream ss_fail;
+      ss_fail << "[HybridAStar] 路径规划失败! 迭代: " << iterations 
+              << ", 已探索: " << closed_list.size() << ", 开放列表: " << open_list.size();
+      debug_utils_->log(ss_fail.str());
   } else {
       double path_length = 0.0;
       for (size_t i = 1; i < global_path.poses.size(); ++i) {
@@ -331,18 +407,14 @@ nav_msgs::msg::Path HybridAStar::createPlan(
                       global_path.poses[i-1].pose.position.y;
           path_length += std::hypot(dx, dy);
       }
-      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "Path found successfully!");
-      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  Path length: %.3f m (%.1f%% of straight-line)",
-        path_length, (path_length / straight_line_dist) * 100.0);
-      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  Waypoints: %zu poses", global_path.poses.size());
-      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  Computation: %d iterations, %zu nodes explored",
-        iterations, closed_list.size());
+      
+      std::stringstream ss_succ;
+      ss_succ << "[HybridAStar] ✓ 成功! 长度: " << path_length << " m (" 
+              << (path_length / straight_line_dist) * 100.0 << "%), 点数: " << global_path.poses.size()
+              << ", 迭代: " << iterations << ", 探索: " << closed_list.size();
+      debug_utils_->log(ss_succ.str());
   }
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
+  // RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
 
   // 5. 清理内存
   for (auto& pair : all_nodes) {
@@ -370,10 +442,11 @@ bool HybridAStar::isCollision(double x, double y, double theta)
     }
     // 检查该栅格的代价值
     unsigned char cost = costmap_->getCost(mx, my);
-    if (cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {
+    // 使用 INSCRIBED_INFLATED_OBSTACLE (253) 作为阈值
+    // 这表示如果机器人中心处于此位置，机器人边缘必然碰撞
+    if (cost >= nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE) {
         return true;
     }
-    // TODO: 增加基于机器人足迹 (Footprint) 的碰撞检测，以支持非圆形机器人
     return false;
 }
 
@@ -434,14 +507,31 @@ bool HybridAStar::getIndex(const Node3D& node, int& x_idx, int& y_idx, int& thet
 }
 
 /**
- * @brief 生成邻居节点 (Motion Primitives)
- * 根据车辆运动学模型，生成下一步可能的 6 种状态
+ * @brief 生成邻居节点 (Motion Primitives) - 调度器
+ * 根据运动模型选择对应的实现
  * 
  * @param current 当前节点
  * @param goal 目标节点 (用于计算 h 值)
  * @return std::vector<Node3D*> 邻居节点列表
  */
 std::vector<Node3D*> HybridAStar::getNeighbors(Node3D* current, const Node3D& goal)
+{
+    if (motion_model_ == "OMNIDIRECTIONAL") {
+        return getNeighborsOmnidirectional(current, goal);
+    } else {
+        return getNeighborsAckermann(current, goal);
+    }
+}
+
+/**
+ * @brief Ackermann 运动模型邻居生成
+ * 类汽车运动学：前进/后退 × 直行/左转/右转
+ * 
+ * @param current 当前节点
+ * @param goal 目标节点
+ * @return std::vector<Node3D*> 邻居节点列表
+ */
+std::vector<Node3D*> HybridAStar::getNeighborsAckermann(Node3D* current, const Node3D& goal)
 {
     std::vector<Node3D*> neighbors;
     double step_size = interpolation_resolution_ * 2.0; // 步长略大于分辨率
@@ -491,6 +581,82 @@ std::vector<Node3D*> HybridAStar::getNeighbors(Node3D* current, const Node3D& go
             neighbors.push_back(next_node);
         }
     }
+    return neighbors;
+}
+
+/**
+ * @brief Omnidirectional 运动模型邻居生成
+ * 全向轮运动学：8方向平移 + 原地旋转
+ * 
+ * @param current 当前节点
+ * @param goal 目标节点
+ * @return std::vector<Node3D*> 邻居节点列表
+ */
+std::vector<Node3D*> HybridAStar::getNeighborsOmnidirectional(Node3D* current, const Node3D& goal)
+{
+    std::vector<Node3D*> neighbors;
+    double step = lateral_step_size_;
+    
+    // ========== Part 1: 8方向平移（朝向保持不变） ==========
+    struct MoveAction {
+        double dx, dy;
+        bool is_diagonal;
+    };
+    
+    std::vector<MoveAction> moves = {
+        // 主方向（4个）
+        {1, 0, false},   // 前
+        {-1, 0, false},  // 后
+        {0, 1, false},   // 左
+        {0, -1, false},  // 右
+        // 对角线（4个）
+        {1, 1, true},    // 左前
+        {1, -1, true},   // 右前
+        {-1, 1, true},   // 左后
+        {-1, -1, true}   // 右后
+    };
+    
+    for (auto& move : moves) {
+        double next_x = current->x + move.dx * step;
+        double next_y = current->y + move.dy * step;
+        double next_theta = current->theta;  // ← 朝向保持不变！
+        
+        if (!isCollision(next_x, next_y, next_theta)) {
+            double dist = step;
+            if (move.is_diagonal) {
+                dist = step * std::sqrt(2.0);  // 对角线距离
+                dist *= diagonal_penalty_;     // 应用惩罚
+            }
+            
+            double g_cost = current->g + dist;
+            
+            Node3D* next = new Node3D(
+                next_x, next_y, next_theta, 
+                g_cost, 0, current, -1, false
+            );
+            next->h = getHeuristic(*next, goal);
+            next->cost = next->g + next->h;
+            neighbors.push_back(next);
+        }
+    }
+    
+    // ========== Part 2: 原地旋转（位置不变） ==========
+    for (int dir : {-1, 1}) {  // 左转、右转
+        double next_theta = current->theta + dir * rotation_step_;
+        
+        if (!isCollision(current->x, current->y, next_theta)) {
+            double g_cost = current->g + rotation_step_ * rotation_penalty_;
+            
+            Node3D* next = new Node3D(
+                current->x, current->y, next_theta,
+                g_cost, 0, current, -1, false
+            );
+            next->h = getHeuristic(*next, goal);
+            next->cost = next->g + next->h;
+            neighbors.push_back(next);
+        }
+    }
+    
     return neighbors;
 }
 
@@ -546,12 +712,21 @@ nav_msgs::msg::Path HybridAStar::reconstructPath(Node3D* node, const geometry_ms
         path.poses.push_back(pose);
     }
     
-    // 添加精确的终点（如果最后一个点不够接近）
+    // 添加精确的终点(如果最后一个点与目标不够接近)
     if (!path.poses.empty()) {
         double dist_to_goal = std::hypot(
             path.poses.back().pose.position.x - goal.pose.position.x,
             path.poses.back().pose.position.y - goal.pose.position.y);
-        if (dist_to_goal > 0.01) {
+            
+        double last_theta = tf2::getYaw(path.poses.back().pose.orientation);
+        double goal_theta = tf2::getYaw(goal.pose.orientation);
+        double ang_to_goal = std::abs(last_theta - goal_theta);
+        // Normalize angle difference
+        while (ang_to_goal > PI) ang_to_goal -= 2.0 * PI;
+        while (ang_to_goal < -PI) ang_to_goal += 2.0 * PI;
+        ang_to_goal = std::abs(ang_to_goal);
+
+        if (dist_to_goal > 0.01 || ang_to_goal > 0.01) {
             geometry_msgs::msg::PoseStamped goal_pose = goal;
             goal_pose.header = path.header;
             path.poses.push_back(goal_pose);
@@ -605,6 +780,73 @@ nav_msgs::msg::Path HybridAStar::tryAnalyticExpansion(Node3D* current, const Nod
         double theta = se2state->getYaw();
         
         reeds_shepp_space_->freeState(state);
+        
+        // 碰撞检测
+        if (isCollision(x, y, theta)) {
+            return nav_msgs::msg::Path(); // 返回空路径表示失败
+        }
+        
+        geometry_msgs::msg::PoseStamped pose;
+        pose.header.frame_id = global_frame_;
+        pose.pose.position.x = x;
+        pose.pose.position.y = y;
+        pose.pose.position.z = 0.0;
+        
+        tf2::Quaternion q;
+        q.setRPY(0, 0, theta);
+        pose.pose.orientation = tf2::toMsg(q);
+        
+        sampled_poses.push_back(pose);
+    }
+    
+    path.poses = sampled_poses;
+}
+
+/**
+ * @brief 全向模式专用：尝试直线连接到目标
+ * 直接从当前点到目标点画直线，朝向在最后才转向目标朝向
+ * 
+ * @param current 当前节点
+ * @param goal 目标节点
+ * @return nav_msgs::msg::Path 如果无碰撞则返回路径，否则返回空路径
+ */
+nav_msgs::msg::Path HybridAStar::tryLinearExpansion(Node3D* current, const Node3D& goal)
+{
+    nav_msgs::msg::Path path;
+    path.header.frame_id = global_frame_;
+    
+    // 计算直线距离
+    double dx = goal.x - current->x;
+    double dy = goal.y - current->y;
+    double linear_dist = std::hypot(dx, dy);
+    
+    // 计算采样点数
+    int num_samples = static_cast<int>(linear_dist / interpolation_resolution_) + 1;
+    if (num_samples < 2) num_samples = 2;
+    
+    std::vector<geometry_msgs::msg::PoseStamped> sampled_poses;
+    
+    // 沿直线采样
+    for (int i = 0; i <= num_samples; ++i) {
+        double t = static_cast<double>(i) / num_samples;
+        
+        double x = current->x + t * dx;
+        double y = current->y + t * dy;
+        
+        // 朝向：在路径的最后20%逐渐转向目标朝向
+        double theta;
+        if (t < 0.8) {
+            // 前80%路径：保持当前朝向
+            theta = current->theta;
+        } else {
+            // 后20%路径：从当前朝向平滑过渡到目标朝向
+            double blend = (t - 0.8) / 0.2;  // 0到1
+            double angle_diff = goal.theta - current->theta;
+            // 归一化角度差
+            while (angle_diff > PI) angle_diff -= 2 * PI;
+            while (angle_diff < -PI) angle_diff += 2 * PI;
+            theta = current->theta + blend * angle_diff;
+        }
         
         // 碰撞检测
         if (isCollision(x, y, theta)) {

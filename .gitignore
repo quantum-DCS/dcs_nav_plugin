@@ -36,3 +36,8 @@ Makefile
 # OS files
 .DS_Store
 Thumbs.db
+
+# Debug output
+planner_log/
+demo_output.png
+obstacles_debug.txt
