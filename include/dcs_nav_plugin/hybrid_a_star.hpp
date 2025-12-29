@@ -15,6 +15,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "nav2_util/lifecycle_node.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
+#include "dcs_nav_plugin/debug_utils.hpp"
 
 #include <ompl/base/spaces/ReedsSheppStateSpace.h>
 #include <ompl/base/ScopedState.h>
@@ -120,6 +121,9 @@ protected:
 
   // Constants
   static constexpr double PI = 3.14159265359;
+  
+  // Debug
+  std::shared_ptr<DebugUtils> debug_utils_;
 };
 
 }  // namespace dcs_nav_plugin

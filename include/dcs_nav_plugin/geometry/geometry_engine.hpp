@@ -8,7 +8,7 @@
 #include <nav2_costmap_2d/costmap_2d.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-// #include "polypartition.h" // 假设已正确include路径配置
+#include "polypartition.h"
 
 namespace dcs_nav_plugin
 {
@@ -40,7 +40,8 @@ public:
     double poly_epsilon, 
     double obstacle_height_thres,
     double inflation_radius,
-    int top_k);
+    int top_k,
+    int dilation_pixels);
 
   /**
    * @brief 从 Costmap 中提取障碍物，并返回经过凸分解和筛选后的多边形列表
@@ -62,6 +63,7 @@ private:
   double min_obstacle_area_; // 最小障碍物面积过滤
   double inflation_radius_;  // 预处理膨胀半径
   int top_k_;                // 保留前 K 个
+  int dilation_pixels_;      // 膨胀像素数 (0=禁用)
 
   // Helper functions
   std::vector<std::vector<cv::Point>> getContoursFromCostmap(nav2_costmap_2d::Costmap2D * costmap);

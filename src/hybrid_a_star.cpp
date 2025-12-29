@@ -130,6 +130,14 @@ void HybridAStar::configure(
       lateral_step_size_, rotation_step_ * 180.0 / M_PI);
   }
 
+  // Debug Utils
+  std::string debug_log_dir;
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".debug.log_dir", rclcpp::ParameterValue("~/ros2_ws/src/dcs_nav_plugin/planner_log"));
+  node->get_parameter(name + ".debug.log_dir", debug_log_dir);
+
+  debug_utils_ = std::make_shared<DebugUtils>();
+  debug_utils_->initialize(debug_log_dir, "planner");
 }
 
 void HybridAStar::cleanup()
@@ -167,6 +175,10 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "开始 Hybrid A* 路径规划...");
   
+  if (debug_utils_) {
+      debug_utils_->log("HybridAStar::createPlan called.");
+  }
+  
   nav_msgs::msg::Path global_path;
   global_path.poses.clear();
   global_path.header.stamp = start.header.stamp;
@@ -197,14 +209,15 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   double goal_y = goal.pose.position.y;
   double goal_theta = tf2::getYaw(goal.pose.orientation);
   
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "起点: (%.3f, %.3f, %.1f°) | 终点: (%.3f, %.3f, %.1f°)",
-    start_x, start_y, start_theta * 180.0 / PI,
-    goal_x, goal_y, goal_theta * 180.0 / PI);
+
+  
+  std::stringstream ss_start;
+  ss_start << "[HybridAStar] 起点: (" << start_x << ", " << start_y << ", " << start_theta * 180.0 / PI << "°) | "
+           << "终点: (" << goal_x << ", " << goal_y << ", " << goal_theta * 180.0 / PI << "°)";
+  debug_utils_->log(ss_start.str());
   
   double straight_line_dist = std::hypot(goal_x - start_x, goal_y - start_y);
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "直线距离: %.3f 米", straight_line_dist);
+  // debug_utils_->log("直线距离: " + std::to_string(straight_line_dist) + " 米");
 
   // 创建起点节点
   Node3D* start_node = new Node3D(start_x, start_y, start_theta, 0.0, 0.0, nullptr, 0, false);
@@ -383,11 +396,10 @@ nav_msgs::msg::Path HybridAStar::createPlan(
     iterations, closed_list.size(), open_list.size());
   
   if (global_path.poses.empty()) {
-      RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), 
-        "路径规划失败! 迭代次数: %d", iterations);
-      RCLCPP_WARN(rclcpp::get_logger("HybridAStar"), 
-        "已探索节点: %zu, 开放列表大小: %zu", 
-        closed_list.size(), open_list.size());
+      std::stringstream ss_fail;
+      ss_fail << "[HybridAStar] 路径规划失败! 迭代: " << iterations 
+              << ", 已探索: " << closed_list.size() << ", 开放列表: " << open_list.size();
+      debug_utils_->log(ss_fail.str());
   } else {
       double path_length = 0.0;
       for (size_t i = 1; i < global_path.poses.size(); ++i) {
@@ -397,18 +409,14 @@ nav_msgs::msg::Path HybridAStar::createPlan(
                       global_path.poses[i-1].pose.position.y;
           path_length += std::hypot(dx, dy);
       }
-      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "✓ 路径规划成功!");
-      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  路径长度: %.3f 米 (直线的 %.1f%%)",
-        path_length, (path_length / straight_line_dist) * 100.0);
-      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  路由点: %zu 个", global_path.poses.size());
-      RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-        "  计算统计: %d 次迭代, %zu 个节点探索",
-        iterations, closed_list.size());
+      
+      std::stringstream ss_succ;
+      ss_succ << "[HybridAStar] ✓ 成功! 长度: " << path_length << " m (" 
+              << (path_length / straight_line_dist) * 100.0 << "%), 点数: " << global_path.poses.size()
+              << ", 迭代: " << iterations << ", 探索: " << closed_list.size();
+      debug_utils_->log(ss_succ.str());
   }
-  RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
+  // RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), "==========================================");
 
   // 5. 清理内存
   for (auto& pair : all_nodes) {
@@ -706,12 +714,21 @@ nav_msgs::msg::Path HybridAStar::reconstructPath(Node3D* node, const geometry_ms
         path.poses.push_back(pose);
     }
     
-    // 添加精确的终点（如果最后一个点不够接近）
+    // 添加精确的终点（如果最后一个点与目标不够接近）
     if (!path.poses.empty()) {
         double dist_to_goal = std::hypot(
             path.poses.back().pose.position.x - goal.pose.position.x,
             path.poses.back().pose.position.y - goal.pose.position.y);
-        if (dist_to_goal > 0.01) {
+            
+        double last_theta = tf2::getYaw(path.poses.back().pose.orientation);
+        double goal_theta = tf2::getYaw(goal.pose.orientation);
+        double ang_to_goal = std::abs(last_theta - goal_theta);
+        // Normalize angle difference
+        while (ang_to_goal > PI) ang_to_goal -= 2.0 * PI;
+        while (ang_to_goal < -PI) ang_to_goal += 2.0 * PI;
+        ang_to_goal = std::abs(ang_to_goal);
+
+        if (dist_to_goal > 0.01 || ang_to_goal > 0.01) {
             geometry_msgs::msg::PoseStamped goal_pose = goal;
             goal_pose.header = path.header;
             path.poses.push_back(goal_pose);

@@ -1,0 +1,82 @@
+# DCS Nav Plugin Template Configuration
+# Copy these sections into your robot's nav2_params.yaml
+
+# ==============================================================================
+# Controller Server Configuration
+# ==============================================================================
+controller_server:
+  ros__parameters:
+    # ... other controller server params ...
+    controller_plugins: ["SHT_MPC"] # Add your plugin name here
+
+    # DCS SHT-MPC Controller Configuration
+    SHT_MPC:
+      plugin: "dcs_nav_plugin/DcsShtMpcController"
+      
+      # Buffer Distance
+      buffer_dist: 0.1
+
+      # MPC Solver Parameters
+      mpc.N: 10                 # Prediction Horizon Steps
+      mpc.dt: 0.1               # Time Step (s)
+      mpc.v_max: 0.5            # Max Linear Velocity (m/s)
+      mpc.omega_max: 1.0        # Max Angular Velocity (rad/s)
+      
+      # MPC Weights (Tuning)
+      mpc.Q_x: 2.0              # X Error Weight
+      mpc.Q_y: 2.0              # Y Error Weight
+      mpc.Q_theta: 5.0          # Heading Error Weight
+      mpc.R_v: 0.1              # Linear Velocity Effort Cost
+      mpc.R_omega: 0.2          # Angular Velocity Effort Cost
+      mpc.lambda_slack: 100000.0 # Slack Variable Cost (Soft Constraints)
+      
+      # Obstacle Avoidance
+      mpc.margin: 0.10          # Safety Margin (m) around robot
+      mpc.sht_epsilon: 0.001    # SHT Algorithm Epsilon
+      
+      # Robot Physical Properties (For Collision Checking)
+      mpc.car_width: 0.16       # Robot Width (m)
+      mpc.car_length: 0.30      # Robot Length (m)
+      
+      # Movement Mode
+      mpc.enable_omni_movement: true # true = Omni/Mecanum, false = Ackermann/Diff
+      mpc.invert_rotation: false     # Invert angular velocity command (if needed)
+
+      # Geometry Engine (Obstacle Extraction)
+      geometry.poly_epsilon: 0.02    # Polygon Approximation Error (m)
+      geometry.inflation_radius: 0.0 # Pre-inflation (usually handled by Costmap InflationLayer instead)
+      geometry.top_k: 20             # Max number of obstacles to consider
+      geometry.dilation_pixels: 1    # Dilation pixels for robustness (0=disabled)
+
+      # Debug
+      debug.log_dir: "/tmp/planner_log" # Directory to save debug logs/images
+
+# ==============================================================================
+# Planner Server Configuration
+# ==============================================================================
+planner_server:
+  ros__parameters:
+    # ... other planner server params ...
+    planner_plugins: ["HybridAStar"]
+
+    HybridAStar:
+      plugin: "dcs_nav_plugin/HybridAStar"
+      
+      # Motion Model
+      motion_model: "OMNIDIRECTIONAL"  # "ACKERMANN" or "OMNIDIRECTIONAL"
+      
+      # General Parameters
+      interpolation_resolution: 0.1
+      shot_distance: 5.0
+      theta_discretization: 72  # 72 bins = 5 degrees
+      
+      # Ackermann Specific
+      min_turning_radius: 0.4
+      reverse_penalty: 2.0
+      direction_change_penalty: 2.0
+      
+      # Omnidirectional Specific
+      lateral_step_size: 0.2     # Lateral step (m)
+      rotation_step: 0.26        # Rotation step (rad, ~15 deg)
+      rotation_penalty: 0.5      # Cost weight for rotation
+      diagonal_penalty: 1.2      # Cost weight for diagonal movement

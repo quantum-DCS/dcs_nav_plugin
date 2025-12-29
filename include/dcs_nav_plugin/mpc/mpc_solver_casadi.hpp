@@ -43,6 +43,11 @@ struct MpcSolution {
   std::vector<geometry_msgs::msg::PoseStamped> predicted_traj;
   double solve_time_ms = 0.0;
   double max_slack = 0.0;
+  
+  // IPOPT Stats
+  int iter_count = 0;
+  double obj_value = 0.0;
+  std::string return_status;
 };
 
 class MpcSolverCasadi
@@ -68,6 +73,19 @@ public:
     const std::vector<geometry_msgs::msg::PoseStamped> & ref_traj,
     const std::vector<Polygon> & obstacles);
 
+  /**
+   * @brief Helper to format all optimization params for logging
+   */
+  std::string getDebugString(
+    const geometry_msgs::msg::PoseStamped & current_pose,
+    const std::vector<geometry_msgs::msg::PoseStamped> & ref_traj,
+    const std::vector<Polygon> & obstacles);
+
+  /**
+   * @brief Helper to format solution result for logging
+   */
+  std::string getResultDebugString(const MpcSolution& sol);
+
 private:
   MpcConfig config_;
   bool initialized_ = false;
@@ -89,6 +107,10 @@ private:
   casadi::MX X_, U_;  // States, Controls
   casadi::MX A_sht_, b_sht_; // Hyperplanes [K, N, 2], [K, N]
   casadi::MX eps_slack_;     // Slack [K, N]
+  
+  // 存储所有超平面变量用于 Warm Start [K * N] 个变量
+  std::vector<casadi::MX> A_sht_vars_;  // 每个元素是 [2,1] 的 MX
+  std::vector<casadi::MX> b_sht_vars_;  // 每个元素是 [1] 的 MX
 
   // Parameters
   casadi::MX P_x0_;    // Initial state
@@ -98,6 +120,11 @@ private:
   casadi::MX P_obs_Vx_;    // [K, max_verts]
   casadi::MX P_obs_Vy_;    // [K, max_verts]
   casadi::MX P_obs_valid_; // [K, 1]
+
+  // Warm Start Cache
+  casadi::DM last_u_opt_; // [n_u, N]
+  casadi::DM last_x_opt_; // [n_x, N+1]
+  bool first_run_ = true;
 
   void buildProblem();
 };

@@ -14,6 +14,8 @@
 
 #include "dcs_nav_plugin/geometry/geometry_engine.hpp"
 #include "dcs_nav_plugin/mpc/mpc_solver_casadi.hpp"
+#include "dcs_nav_plugin/debug_utils.hpp"
+#include "rcl_interfaces/msg/log.hpp"
 
 namespace dcs_nav_plugin
 {
@@ -60,6 +62,7 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr all_obs_pub_;
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr sel_obs_pub_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr local_plan_pub_;
+  rclcpp::Subscription<rcl_interfaces::msg::Log>::SharedPtr rosout_sub_;
 
   // Data
   nav_msgs::msg::Path global_plan_;
@@ -67,6 +70,18 @@ private:
   
   // Parameters
   MpcConfig config_;
+  
+  // Geometry Engine Parameters
+  double geometry_poly_epsilon_{0.05};
+  double geometry_inflation_radius_{0.0};
+  int geometry_top_k_{6};
+  int geometry_dilation_pixels_{1};
+  
+  // Omni Directional
+  bool enable_omni_movement_{true};
+  
+  // Rotation Correction (for Gazebo simulation issue)
+  bool invert_rotation_{false};
   
   // Helpers
   void loadParameters();
@@ -92,6 +107,16 @@ private:
 
   // TF
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  
+  // Debug Utils
+  std::shared_ptr<DebugUtils> debug_utils_;
+  std::string debug_log_dir_;
+  
+  // Global Map Subscription for visualization
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_map_sub_;
+  nav_msgs::msg::OccupancyGrid::SharedPtr latest_global_map_;
+  
+  int debug_frame_count_ = 0;
 };
 
 }  // namespace dcs_nav_plugin

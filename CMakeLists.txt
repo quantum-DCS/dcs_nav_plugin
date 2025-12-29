@@ -26,6 +26,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(ompl REQUIRED)
 find_package(OpenCV REQUIRED)
 # CasADi C++ (required for optimization). Make optional to avoid blocking builds when unavailable.
@@ -42,11 +43,11 @@ endif()
 set(DCS_NAV_PLUGIN_SRCS
   src/hybrid_a_star.cpp
   src/3rd_party/polypartition/polypartition.cpp
+  src/debug_utils.cpp
 )
 
 if(casadi_FOUND)
   list(APPEND DCS_NAV_PLUGIN_SRCS 
-    src/hyperplane_planner.cpp
     src/sub_sht_mpc_controller.cpp
     src/geometry/geometry_engine.cpp
     src/mpc/mpc_solver_casadi.cpp
@@ -101,6 +102,7 @@ ament_target_dependencies(dcs_nav_plugin
   tf2_ros
   tf2_geometry_msgs
   pluginlib
+  rcl_interfaces
 )
 
 pluginlib_export_plugin_description_file(nav2_core global_planner_plugin.xml)
@@ -152,6 +154,7 @@ ament_export_dependencies(
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
   # the following line skips the linter which checks for copyrights
   # uncomment the line when a copyright and license is not present in all source files
   #set(ament_cmake_copyright_FOUND TRUE)
@@ -159,6 +162,27 @@ if(BUILD_TESTING)
   # uncomment the line when this package is not in a git repo
   #set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+  
+  # GeometryEngine Tests
+  ament_add_gtest(test_geometry_engine test/test_geometry_engine.cpp)
+  target_link_libraries(test_geometry_engine dcs_nav_plugin)
+  target_include_directories(test_geometry_engine PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/3rd_party/polypartition>
+    ${OpenCV_INCLUDE_DIRS}
+  )
+  
+  # MPC Solver Tests (only if CasADi is available)
+  if(casadi_FOUND)
+    ament_add_gtest(test_mpc_solver test/test_mpc_solver.cpp)
+    target_link_libraries(test_mpc_solver dcs_nav_plugin)
+    target_include_directories(test_mpc_solver PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    )
+    ament_target_dependencies(test_mpc_solver
+      tf2_geometry_msgs
+    )
+  endif()
 endif()
 
 ament_package()
