@@ -209,8 +209,6 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   double goal_y = goal.pose.position.y;
   double goal_theta = tf2::getYaw(goal.pose.orientation);
   
-
-  
   std::stringstream ss_start;
   ss_start << "[HybridAStar] 起点: (" << start_x << ", " << start_y << ", " << start_theta * 180.0 / PI << "°) | "
            << "终点: (" << goal_x << ", " << goal_y << ", " << goal_theta * 180.0 / PI << "°)";
@@ -266,7 +264,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
   int max_iterations = 100000; // 最大迭代次数，防止死循环
   
   RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
-    "开始搜索，初始启发值: %.3f", start_node->h);
+    "开始搜索,初始启发值: %.3f", start_node->h);
 
   // --- 主搜索循环 ---
   while (!open_list.empty() && iterations < max_iterations) {
@@ -291,7 +289,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
     while (angle_diff > PI) angle_diff = std::abs(angle_diff - 2 * PI);
     
     if (dist_to_goal < 0.01 && angle_diff < 0.05) { 
-        // 找到路径，回溯生成完整路径
+        // 找到路径,回溯生成完整路径
         RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
           "已到达终点! 最终误差: 距离=%.3fm, 角度=%.1f°",
           dist_to_goal, angle_diff * 180.0 / PI);
@@ -304,7 +302,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
         nav_msgs::msg::Path analytic_path;
         
         if (motion_model_ == "OMNIDIRECTIONAL") {
-            // 全向模式：使用直线扩展（不改变朝向，直接移动）
+            // 全向模式:使用直线扩展(不改变朝向,直接移动)
             analytic_path = tryLinearExpansion(current_node, goal_node);
             if (!analytic_path.poses.empty()) {
                 RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
@@ -312,7 +310,7 @@ nav_msgs::msg::Path HybridAStar::createPlan(
                   analytic_path.poses.size());
             }
         } else {
-            // Ackermann模式：使用Reeds-Shepp曲线
+            // Ackermann模式:使用Reeds-Shepp曲线
             analytic_path = tryAnalyticExpansion(current_node, goal_node);
             if (!analytic_path.poses.empty()) {
                 RCLCPP_INFO(rclcpp::get_logger("HybridAStar"), 
@@ -714,7 +712,7 @@ nav_msgs::msg::Path HybridAStar::reconstructPath(Node3D* node, const geometry_ms
         path.poses.push_back(pose);
     }
     
-    // 添加精确的终点（如果最后一个点与目标不够接近）
+    // 添加精确的终点(如果最后一个点与目标不够接近)
     if (!path.poses.empty()) {
         double dist_to_goal = std::hypot(
             path.poses.back().pose.position.x - goal.pose.position.x,
@@ -802,7 +800,6 @@ nav_msgs::msg::Path HybridAStar::tryAnalyticExpansion(Node3D* current, const Nod
     }
     
     path.poses = sampled_poses;
-    return path;
 }
 
 /**
