@@ -193,15 +193,20 @@ void MpcSolverCasadi::buildProblem()
 
   // IPOPT Solver Options - Conservative Performance Optimization
   Dict opts;
-  opts["ipopt.print_level"] = 5; // Enable full internal logging as requested
+  opts["ipopt.print_level"] = 0; // Disable full internal logging for performance
   opts["print_time"] = 0;
   opts["expand"] = true;
+  opts["ipopt.sb"] = "yes"; // Suppress banner
   
   // Iteration and convergence limits
-  opts["ipopt.max_iter"] = 100;              // 限制最大迭代次数
-  opts["ipopt.tol"] = 1e-3;                  // 放宽收敛精度
-  opts["ipopt.acceptable_tol"] = 0.01;       // 可接受解的容差
-  opts["ipopt.acceptable_iter"] = 15;        // 允许提前终止的迭代次数
+  opts["ipopt.max_iter"] = 100;               // 限制最大迭代次数
+  opts["ipopt.tol"] = 1e-2;                  // 放宽收敛精度
+  opts["ipopt.acceptable_tol"] = 0.05;       // 可接受解的容差
+  opts["ipopt.acceptable_iter"] = 10;         // 允许提前终止的迭代次数
+  opts["ipopt.linear_solver"] = "mumps";     // Default
+  opts["ipopt.warm_start_init_point"] = "yes"; // Enable warm start if possible (CasADi Opti handles this via set_initial ?)
+  // Note: Opti interface sets initial guess via subject_to/set_initial per solve call, but ipopt options help too.
+
   
   opti_.solver("ipopt", opts);
 }

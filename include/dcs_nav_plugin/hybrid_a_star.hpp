@@ -63,7 +63,7 @@ public:
   ~HybridAStar();
 
   void configure(
-    const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+    rclcpp_lifecycle::LifecycleNode::SharedPtr parent,
     std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
 
@@ -90,7 +90,7 @@ protected:
   nav_msgs::msg::Path tryAnalyticExpansion(Node3D* current, const Node3D& goal);
   nav_msgs::msg::Path tryLinearExpansion(Node3D* current, const Node3D& goal);
 
-  rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
+  rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
   std::shared_ptr<tf2_ros::Buffer> tf_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
   nav2_costmap_2d::Costmap2D * costmap_;

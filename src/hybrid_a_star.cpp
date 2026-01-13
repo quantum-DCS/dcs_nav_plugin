@@ -26,7 +26,7 @@ HybridAStar::~HybridAStar()
  * @param costmap_ros 代价地图ROS接口
  */
 void HybridAStar::configure(
-  const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+  rclcpp_lifecycle::LifecycleNode::SharedPtr parent,
   std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
 {
@@ -37,7 +37,7 @@ void HybridAStar::configure(
   costmap_ = costmap_ros_->getCostmap(); // 获取底层代价地图对象
   global_frame_ = costmap_ros_->getGlobalFrameID(); // 获取全局坐标系（通常是 map）
 
-  auto node = node_.lock();
+  auto node = node_;
   if (!node) {
     throw std::runtime_error("Unable to lock node!");
   }

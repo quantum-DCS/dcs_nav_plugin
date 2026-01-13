@@ -3,20 +3,19 @@
 #include "nav2_core/exceptions.hpp"
 #include "nav2_util/geometry_utils.hpp"
 #include <tf2/utils.h>
-#include "rcl_interfaces/msg/log.hpp"
 
 namespace dcs_nav_plugin
 {
 
 void DcsShtMpcController::configure(
-  const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+  const rclcpp_lifecycle::LifecycleNode::SharedPtr & parent,
   std::string name,
-  std::shared_ptr<tf2_ros::Buffer> tf,
-  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
+  const std::shared_ptr<tf2_ros::Buffer> & tf,
+  const std::shared_ptr<nav2_costmap_2d::Costmap2DROS> & costmap_ros)
 {
   parent_ = parent;
-  clock_ = parent.lock()->get_clock();
-  logger_ = parent.lock()->get_logger();
+  clock_ = parent->get_clock();
+  logger_ = parent->get_logger();
   costmap_ros_ = costmap_ros;
   costmap_ = costmap_ros_->getCostmap();
   plugin_name_ = name;
@@ -34,7 +33,7 @@ void DcsShtMpcController::configure(
   mpc_solver_->initialize();
 
   // Publishers
-  auto node = parent.lock();
+  auto node = parent;
   all_obs_pub_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(name + "/all_obstacles", 1);
   sel_obs_pub_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(name + "/selected_obstacles", 1);
   local_plan_pub_ = node->create_publisher<nav_msgs::msg::Path>(name + "/local_plan", 1);
@@ -50,31 +49,6 @@ void DcsShtMpcController::configure(
     [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
         latest_global_map_ = msg;
     });
-
-  // Rosout Subscription
-  // Use SystemDefaults or SensorData for rosout. It publishes with BestEffort usually if it's high throughput,
-  // but standard rosout is reliable. Let's use standard default subscription QoS which adapts.
-  // Actually, to be safe, SystemDefaultsQoS is best for general topics unless we know otherwise.
-  // Or create specific QoS profile.
-  auto qos_rosout = rclcpp::SystemDefaultsQoS();
-  rosout_sub_ = node->create_subscription<rcl_interfaces::msg::Log>(
-      "/rosout", qos_rosout,
-      [this](const rcl_interfaces::msg::Log::SharedPtr msg) {
-          // Filter logs from controller_server or this plugin
-          // msg->name usually contains node name
-          // We want logs from "controller_server" (Nav2 controller)
-          // Also maybe "planner_server" if user wants, but request was specific.
-          // Let's broaden slightly to capture useful context if needed, but strict to user request:
-          // User said: like "[controller_server]: [follow_path]..."
-          
-          if (msg->name == "controller_server" || msg->name == "dcs_nav_plugin" || msg->name == "geometry_engine" || msg->name.find("controller") != std::string::npos) {
-              std::string label = msg->name;
-              // Format: [NodeName] Msg
-              std::stringstream ss;
-              ss << "[" << label << "] " << msg->msg;
-              debug_utils_->logToFile(ss.str());
-          }
-      });
 
   RCLCPP_INFO(logger_, "Configured DcsShtMpcController: %s", name.c_str());
 }
@@ -117,14 +91,9 @@ void DcsShtMpcController::setPlan(const nav_msgs::msg::Path & path)
   }
 }
 
-void DcsShtMpcController::setSpeedLimit(const double & speed_limit, const bool & percentage)
-{
-  // Implementation for speed limit override
-}
-
 void DcsShtMpcController::loadParameters()
 {
-  auto node = parent_.lock();
+  auto node = parent_;
   
   // Helper macro for cleaner code
   auto declare_and_get = [&](const std::string& param, auto& target, auto default_val) {
@@ -183,10 +152,8 @@ void DcsShtMpcController::loadParameters()
 
 geometry_msgs::msg::TwistStamped DcsShtMpcController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & pose,
-  const geometry_msgs::msg::Twist & velocity,
-  nav2_core::GoalChecker * goal_checker)
+  const geometry_msgs::msg::Twist & velocity)
 {
-  (void)goal_checker; // unused
 
   // 1. Transform Global Plan to Controller Frame (Costmap Frame)
   nav_msgs::msg::Path transformed_plan;
@@ -732,11 +699,15 @@ bool DcsShtMpcController::checkCollision(
             // pointPolygonTest: Positive=Inside, Negative=Outside, Zero=On Edge
             double dist = cv::pointPolygonTest(poly, robot_pt, true);
             
-            // Collision if inside (dist>0) or within margin (dist > -margin)
-            // FIX: Use config_.margin instead of robot_radius to match MPC constraints
-            if (dist > -config_.margin) {
+            // Collision if inside (dist>0) or significantly inside margin
+            // FIX: Relaxed Safety Shield. Only stop if very close to obstacle (0m or -0.02m)
+            // The polygon is already dilated by GeometryEngine (approx 5cm). 
+            // Using full margin (10cm) caused false positives when starting near obstacles.
+            // dist > 0 means inside the dilated polygon.
+            double safety_threshold = 0.0; // Was -config_.margin
+            if (dist > safety_threshold) {
                 RCLCPP_WARN_THROTTLE(logger_, *clock_, 1000, 
-                    "Safety Shield: Predicted collision (dist=%.3f, threshold=-%.3f)", dist, -config_.margin);
+                    "Safety Shield: Predicted collision (dist=%.3f, threshold=%.3f)", dist, safety_threshold);
                 return true;
             }
         }

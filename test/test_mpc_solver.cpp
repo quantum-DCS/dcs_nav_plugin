@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "dcs_nav_plugin/mpc/mpc_solver_casadi.hpp"
 #include <tf2/utils.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
 namespace dcs_nav_plugin
 {

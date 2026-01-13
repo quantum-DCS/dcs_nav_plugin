@@ -27,10 +27,10 @@ public:
   ~DcsShtMpcController() override = default;
 
   void configure(
-    const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & parent,
     std::string name, 
-    std::shared_ptr<tf2_ros::Buffer> tf,
-    std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
+    const std::shared_ptr<tf2_ros::Buffer> & tf,
+    const std::shared_ptr<nav2_costmap_2d::Costmap2DROS> & costmap_ros) override;
 
   void cleanup() override;
   void activate() override;
@@ -38,12 +38,9 @@ public:
 
   geometry_msgs::msg::TwistStamped computeVelocityCommands(
     const geometry_msgs::msg::PoseStamped & pose,
-    const geometry_msgs::msg::Twist & velocity,
-    nav2_core::GoalChecker * goal_checker) override;
+    const geometry_msgs::msg::Twist & velocity) override;
 
   void setPlan(const nav_msgs::msg::Path & path) override;
-
-  void setSpeedLimit(const double & speed_limit, const bool & percentage) override;
 
 private:
   // Components
@@ -51,7 +48,7 @@ private:
   std::shared_ptr<MpcSolverCasadi> mpc_solver_;
   
   // ROS Interfaces
-  rclcpp_lifecycle::LifecycleNode::WeakPtr parent_;
+  rclcpp_lifecycle::LifecycleNode::SharedPtr parent_;
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Logger logger_{rclcpp::get_logger("DcsShtMpcController")};
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
@@ -62,7 +59,6 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr all_obs_pub_;
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr sel_obs_pub_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr local_plan_pub_;
-  rclcpp::Subscription<rcl_interfaces::msg::Log>::SharedPtr rosout_sub_;
 
   // Data
   nav_msgs::msg::Path global_plan_;
